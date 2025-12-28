@@ -8,13 +8,64 @@ Based on MCP best practices:
 
 Analytics: Data collected to ~/.android-shell-mcp/analytics.jsonl
            Read via separate NoSQL MCP server (internal dev use only)
+
+TEAM_011: Added CLI detection to suggest project-specific tools over raw commands.
 """
+import os
 from mcp.server.fastmcp import FastMCP
 from core.manager import ShellManager
 from utils import analytics
 
 # Global shell manager instance
 _manager = ShellManager()
+
+# TEAM_011: Known project CLIs to detect and suggest
+# Format: (marker_file, cli_path_pattern, suggested_commands)
+KNOWN_PROJECT_CLIS = [
+    # Sovereign VM project
+    ("cmd/sovereign/main.go", "go run ./cmd/sovereign", [
+        "build --sql    # Build VM (Docker + rootfs)",
+        "deploy --sql   # Push files to device", 
+        "start --sql    # Start VM with gvproxy",
+        "test --sql     # Verify connectivity",
+    ]),
+    # Add more project CLIs here as needed
+]
+
+
+def _detect_project_cli() -> str:
+    """
+    TEAM_011: Detect if current working context has a known project CLI.
+    Returns suggestion string if found, empty string otherwise.
+    """
+    # Check common project locations
+    project_paths = [
+        os.path.expanduser("~/Projects/android/kernel/sovereign"),
+        os.path.expanduser("~/sovereign"),
+        "/home/vince/Projects/android/kernel/sovereign",
+    ]
+    
+    for project_path in project_paths:
+        for marker_file, cli_cmd, commands in KNOWN_PROJECT_CLIS:
+            marker_path = os.path.join(project_path, marker_file)
+            if os.path.exists(marker_path):
+                suggestion = [
+                    "",
+                    "=" * 60,
+                    "PROJECT CLI DETECTED: sovereign",
+                    f"Location: {project_path}",
+                    "",
+                    "Consider using the CLI instead of raw adb commands:",
+                    f"  cd {project_path}",
+                ]
+                for cmd in commands:
+                    suggestion.append(f"  {cli_cmd} {cmd}")
+                suggestion.append("")
+                suggestion.append("Use MCP tools for: debugging, logs, interactive troubleshooting")
+                suggestion.append("=" * 60)
+                return "\n".join(suggestion)
+    
+    return ""
 
 
 def _filter_output(result: str, max_lines: int = None, output_mode: str = "tail", grep: str = None) -> str:
@@ -120,8 +171,14 @@ def register_tools(mcp: FastMCP):
         - Mode (adb/fastboot/recovery/sideload/unauthorized/offline)
         - Model name if available
         - Actionable guidance for each state
+        - Project CLI suggestions if detected (TEAM_011)
         """
-        return _manager.list_all_devices()
+        result = _manager.list_all_devices()
+        # TEAM_011: Append CLI suggestions if a known project is detected
+        cli_suggestion = _detect_project_cli()
+        if cli_suggestion:
+            result += cli_suggestion
+        return result
 
     # ==================== TOOL 2: start_shell ====================
     @mcp.tool()
@@ -296,16 +353,22 @@ def register_tools(mcp: FastMCP):
         """
         Transfer files to/from device: pull or push.
         
+        ⚠️  LIMITATION: Max ~1MB files. For larger files, use project CLI or adb directly.
+        
         Args:
             action: "pull" (read from device) or "push" (write to device)
             device_serial: Device serial number
             remote_path: Full path on device (e.g., "/data/local/tmp/file.txt")
-            content: Required for "push" - content to write
+            content: Required for "push" - content to write (text only, ~1MB max)
             max_size_kb: Max file size for pull (default 1MB)
         
         Examples:
             file_transfer("pull", "SERIAL", "/data/local/tmp/log.txt")
             file_transfer("push", "SERIAL", "/data/local/tmp/config.txt", content="key=value")
+        
+        For large files (rootfs, images, etc.):
+            - Use project CLI if available (e.g., `sovereign deploy`)
+            - Or use: adb push <local> <remote>
         """
         action = action.lower()
         if action == "pull":
@@ -313,6 +376,17 @@ def register_tools(mcp: FastMCP):
         elif action == "push":
             if content is None:
                 return "STATUS: ERROR\nReason: 'push' requires content"
+            # TEAM_011: Warn about size limits
+            content_size_kb = len(content.encode('utf-8')) / 1024
+            if content_size_kb > 1024:
+                return (
+                    f"STATUS: ERROR\n"
+                    f"Reason: Content too large ({content_size_kb:.1f}KB > 1MB limit)\n"
+                    f"\n"
+                    f"For large files, use:\n"
+                    f"  - Project CLI: sovereign deploy (if available)\n"
+                    f"  - Direct ADB: adb push <local_file> {remote_path}\n"
+                )
             return _manager.push_file(device_serial, remote_path, content)
         else:
             return f"STATUS: ERROR\nReason: Unknown action '{action}'. Use: pull, push"
