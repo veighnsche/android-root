@@ -1,0 +1,19 @@
+[project]
+name = "android-shell-manager"
+version = "1.0.0"
+description = "MCP server for managing Android device shells"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp",
+    "pexpect",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.scripts]
+android-shell-manager = "server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
